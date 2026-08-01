@@ -12,6 +12,7 @@ from telegram_utils import (
     send_document,
     send_message,
     send_photo,
+    send_video,
     set_webhook,
 )
 
@@ -75,13 +76,7 @@ def process_url(chat_id, url, message_id):
     workdir = f"/tmp/media/{uuid.uuid4().hex}"
     try:
         items, status = extract_media(url, workdir)
-
-        # We only ever attempt to send photos/documents. Videos are counted
-        # but not sent (this bot is images-only).
-        photo_items = [i for i in items if i["kind"] == "photo"]
-        doc_items = [i for i in items if i["kind"] not in ("photo", "video")]
-        video_items = [i for i in items if i["kind"] == "video"]
-        sendable = (photo_items + doc_items)[:MAX_ITEMS]
+        sendable = items[:MAX_ITEMS]
 
         sent = 0
         for item in sendable:
@@ -89,6 +84,8 @@ def process_url(chat_id, url, message_id):
             try:
                 if item["kind"] == "photo":
                     resp = send_photo(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
+                elif item["kind"] == "video":
+                    resp = send_video(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
                 else:
                     resp = send_document(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
 
@@ -99,36 +96,23 @@ def process_url(chat_id, url, message_id):
             except Exception:
                 logger.exception("Failed to send item: %s", item)
 
-        has_video = len(video_items) > 0
-        has_photo_sent = sent > 0
-
         if not items:
-            # Nothing extracted at all -- most likely an unsupported/video post.
             send_message(
                 BOT_TOKEN, chat_id,
-                f"Couldn't grab anything from this one (might be a video):\n{url}",
+                f"Couldn't find any media in this one:\n{url}",
                 reply_to_message_id=message_id,
             )
-        elif has_video and has_photo_sent:
-            n = len(video_items)
-            noun = "a video" if n == 1 else f"{n} videos"
-            send_message(
-                BOT_TOKEN, chat_id,
-                f"Sent the photos -- there's also {noun} in there I can't grab:\n{url}",
-                reply_to_message_id=message_id,
-            )
-        elif has_video and not has_photo_sent:
-            n = len(video_items)
-            noun = "a video" if n == 1 else f"{n} videos"
-            send_message(
-                BOT_TOKEN, chat_id,
-                f"Looks like this is {noun} -- I only grab images:\n{url}",
-                reply_to_message_id=message_id,
-            )
-        elif has_photo_sent:
-            # Pure photo success -- clean up by deleting the original message.
+        elif sent == len(sendable) and sent > 0:
+            # Everything found got sent successfully -- clean up the original message.
             if message_id:
                 delete_message(BOT_TOKEN, chat_id, message_id)
+        elif sent > 0:
+            missed = len(sendable) - sent
+            send_message(
+                BOT_TOKEN, chat_id,
+                f"Sent {sent}/{len(sendable)} -- {missed} item(s) failed to send:\n{url}",
+                reply_to_message_id=message_id,
+            )
         else:
             send_message(
                 BOT_TOKEN, chat_id,
