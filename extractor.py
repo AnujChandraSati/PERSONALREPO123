@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 
 import yt_dlp
 from RedDownloader import RedDownloader
@@ -15,6 +16,17 @@ def _kind_for_ext(ext):
     if ext in VIDEO_EXTS:
         return "video"
     return "document"
+
+
+def _with_429_retry(fn, retries=1, delay=5):
+    # Call fn() -> (items, status). If status mentions a 429, wait and retry once.
+    items, status = fn()
+    attempt = 0
+    while not items and "429" in status and attempt < retries:
+        time.sleep(delay)
+        items, status = fn()
+        attempt += 1
+    return items, status
 
 
 # ---------- Reddit (RedDownloader) ----------
@@ -114,26 +126,24 @@ def extract_media(url, workdir):
     if "redgifs.com" in url:
         # RedGifs is a separate host Reddit often embeds/links out to for GIFs.
         # RedDownloader doesn't resolve it; yt-dlp has a dedicated extractor.
-        items, status = extract_ytdlp(url)
+        items, status = _with_429_retry(lambda: extract_ytdlp(url))
         if items:
             return items, f"[yt-dlp/redgifs] {status}"
         g_items, g_status = extract_gallery_dl(url)
         return g_items, f"[yt-dlp/redgifs] {status} | [gallery-dl fallback] {g_status}"
 
     if "reddit.com" in url or "redd.it" in url:
-        items, status = extract_reddit(url, workdir)
+        items, status = _with_429_retry(lambda: extract_reddit(url, workdir))
         if items:
             return items, f"[RedDownloader] {status}"
 
         # RedDownloader misses some cases (e.g. GIFs inside galleries, which
-        # Reddit serves as looping MP4s or links out to RedGifs). Retry with
-        # gallery-dl, then yt-dlp (which can resolve embedded RedGifs links).
-        g_items, g_status = extract_gallery_dl(url)
-        if g_items:
-            return g_items, f"[RedDownloader] {status} | [gallery-dl fallback] {g_status}"
-
-        yt_items, yt_status = extract_ytdlp(url)
-        return yt_items, f"[RedDownloader] {status} | [gallery-dl] {g_status} | [yt-dlp fallback] {yt_status}"
+        # Reddit serves as looping MP4s or links out to RedGifs). gallery-dl
+        # can usually resolve those in one shot -- we stop here rather than
+        # also trying yt-dlp, since each extra attempt is another hit against
+        # Reddit's rate-limited public JSON API.
+        g_items, g_status = _with_429_retry(lambda: extract_gallery_dl(url))
+        return g_items, f"[RedDownloader] {status} | [gallery-dl fallback] {g_status}"
 
     items, status = extract_ytdlp(url)
     if items:
