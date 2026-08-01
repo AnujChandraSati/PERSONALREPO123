@@ -1,0 +1,6 @@
+flask
+gunicorn
+requests
+yt-dlp
+gallery-dl
+RedDownloader
