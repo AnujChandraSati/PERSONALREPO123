@@ -7,7 +7,13 @@ import uuid
 from flask import Flask, jsonify, request
 
 from extractor import extract_media
-from telegram_utils import send_document, send_message, send_photo, send_video, set_webhook
+from telegram_utils import (
+    delete_message,
+    send_document,
+    send_message,
+    send_photo,
+    set_webhook,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,6 +47,7 @@ def webhook():
         return jsonify(ok=True)
 
     chat_id = message["chat"]["id"]
+    message_id = message.get("message_id")
     text = (message.get("text") or "").strip()
 
     if not text:
@@ -60,30 +67,28 @@ def webhook():
 
     # Process in a background thread so we return 200 to Telegram immediately
     # (otherwise Telegram will retry the webhook on slow extractions).
-    threading.Thread(target=process_url, args=(chat_id, text), daemon=True).start()
+    threading.Thread(target=process_url, args=(chat_id, text, message_id), daemon=True).start()
     return jsonify(ok=True)
 
 
-def process_url(chat_id, url):
+def process_url(chat_id, url, message_id):
     workdir = f"/tmp/media/{uuid.uuid4().hex}"
     try:
-        send_message(BOT_TOKEN, chat_id, "Working on it...")
         items, status = extract_media(url, workdir)
 
-        if not items:
-            send_message(BOT_TOKEN, chat_id, f"Couldn't find any media.\n\n{status}")
-            return
+        # We only ever attempt to send photos/documents. Videos are counted
+        # but not sent (this bot is images-only).
+        photo_items = [i for i in items if i["kind"] == "photo"]
+        doc_items = [i for i in items if i["kind"] not in ("photo", "video")]
+        video_items = [i for i in items if i["kind"] == "video"]
+        sendable = (photo_items + doc_items)[:MAX_ITEMS]
 
-        items = items[:MAX_ITEMS]
         sent = 0
-
-        for item in items:
+        for item in sendable:
             is_file = item["source"] == "file"
             try:
                 if item["kind"] == "photo":
                     resp = send_photo(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
-                elif item["kind"] == "video":
-                    resp = send_video(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
                 else:
                     resp = send_document(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
 
@@ -94,11 +99,49 @@ def process_url(chat_id, url):
             except Exception:
                 logger.exception("Failed to send item: %s", item)
 
-        send_message(BOT_TOKEN, chat_id, f"Sent {sent}/{len(items)} item(s).\n\n{status}")
+        has_video = len(video_items) > 0
+        has_photo_sent = sent > 0
+
+        if not items:
+            # Nothing extracted at all -- most likely an unsupported/video post.
+            send_message(
+                BOT_TOKEN, chat_id,
+                f"Couldn't grab anything from this one (might be a video):\n{url}",
+                reply_to_message_id=message_id,
+            )
+        elif has_video and has_photo_sent:
+            n = len(video_items)
+            noun = "a video" if n == 1 else f"{n} videos"
+            send_message(
+                BOT_TOKEN, chat_id,
+                f"Sent the photos -- there's also {noun} in there I can't grab:\n{url}",
+                reply_to_message_id=message_id,
+            )
+        elif has_video and not has_photo_sent:
+            n = len(video_items)
+            noun = "a video" if n == 1 else f"{n} videos"
+            send_message(
+                BOT_TOKEN, chat_id,
+                f"Looks like this is {noun} -- I only grab images:\n{url}",
+                reply_to_message_id=message_id,
+            )
+        elif has_photo_sent:
+            # Pure photo success -- clean up by deleting the original message.
+            if message_id:
+                delete_message(BOT_TOKEN, chat_id, message_id)
+        else:
+            send_message(
+                BOT_TOKEN, chat_id,
+                f"Found media but couldn't send it:\n{url}",
+                reply_to_message_id=message_id,
+            )
 
     except Exception as e:
         logger.exception("process_url failed")
-        send_message(BOT_TOKEN, chat_id, f"Something went wrong: {e}")
+        send_message(
+            BOT_TOKEN, chat_id, f"Something went wrong with:\n{url}",
+            reply_to_message_id=message_id,
+        )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
