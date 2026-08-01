@@ -113,7 +113,13 @@ def extract_media(url, workdir):
 
     if "reddit.com" in url or "redd.it" in url:
         items, status = extract_reddit(url, workdir)
-        return items, f"[RedDownloader] {status}"
+        if items:
+            return items, f"[RedDownloader] {status}"
+
+        # RedDownloader misses some cases (e.g. GIFs inside galleries, which
+        # Reddit serves as looping MP4s). Retry with gallery-dl before giving up.
+        g_items, g_status = extract_gallery_dl(url)
+        return g_items, f"[RedDownloader] {status} | [gallery-dl fallback] {g_status}"
 
     items, status = extract_ytdlp(url)
     if items:
