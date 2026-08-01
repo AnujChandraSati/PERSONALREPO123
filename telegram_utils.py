@@ -12,8 +12,15 @@ def _call(token, method, data=None, files=None, timeout=60):
         return {"ok": False, "description": resp.text}
 
 
-def send_message(token, chat_id, text):
-    return _call(token, "sendMessage", data={"chat_id": chat_id, "text": text[:4096]})
+def send_message(token, chat_id, text, reply_to_message_id=None):
+    data = {"chat_id": chat_id, "text": text[:4096]}
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
+    return _call(token, "sendMessage", data=data)
+
+
+def delete_message(token, chat_id, message_id):
+    return _call(token, "deleteMessage", data={"chat_id": chat_id, "message_id": message_id})
 
 
 def send_photo(token, chat_id, source, caption=None, is_file=False):
