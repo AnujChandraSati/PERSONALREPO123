@@ -111,15 +111,29 @@ def extract_gallery_dl(url):
 def extract_media(url, workdir):
     url = url.strip()
 
+    if "redgifs.com" in url:
+        # RedGifs is a separate host Reddit often embeds/links out to for GIFs.
+        # RedDownloader doesn't resolve it; yt-dlp has a dedicated extractor.
+        items, status = extract_ytdlp(url)
+        if items:
+            return items, f"[yt-dlp/redgifs] {status}"
+        g_items, g_status = extract_gallery_dl(url)
+        return g_items, f"[yt-dlp/redgifs] {status} | [gallery-dl fallback] {g_status}"
+
     if "reddit.com" in url or "redd.it" in url:
         items, status = extract_reddit(url, workdir)
         if items:
             return items, f"[RedDownloader] {status}"
 
         # RedDownloader misses some cases (e.g. GIFs inside galleries, which
-        # Reddit serves as looping MP4s). Retry with gallery-dl before giving up.
+        # Reddit serves as looping MP4s or links out to RedGifs). Retry with
+        # gallery-dl, then yt-dlp (which can resolve embedded RedGifs links).
         g_items, g_status = extract_gallery_dl(url)
-        return g_items, f"[RedDownloader] {status} | [gallery-dl fallback] {g_status}"
+        if g_items:
+            return g_items, f"[RedDownloader] {status} | [gallery-dl fallback] {g_status}"
+
+        yt_items, yt_status = extract_ytdlp(url)
+        return yt_items, f"[RedDownloader] {status} | [gallery-dl] {g_status} | [yt-dlp fallback] {yt_status}"
 
     items, status = extract_ytdlp(url)
     if items:
