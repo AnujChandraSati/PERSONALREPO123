@@ -29,19 +29,43 @@ BROWSER_HEADERS = {
 }
 
 
+REFERER_MAP = {
+    "redd.it": "https://www.reddit.com/",
+    "reddit.com": "https://www.reddit.com/",
+    "redgifs.com": "https://www.redgifs.com/",
+    "twimg.com": "https://twitter.com/",
+    "cdninstagram.com": "https://www.instagram.com/",
+}
+
+
+def _headers_for_url(url):
+    headers = dict(BROWSER_HEADERS)
+    for domain, referer in REFERER_MAP.items():
+        if domain in url:
+            headers["Referer"] = referer
+            break
+    return headers
+
+
 def _download_url_to_file(url, workdir, idx):
-    # Download a remote media URL server-side (with browser headers) so
-    # Telegram never has to fetch it directly -- avoids hotlink protection /
+    # Download a remote media URL server-side (with browser + referer headers)
+    # so Telegram never has to fetch it directly -- avoids hotlink protection /
     # missing-header rejections from Reddit/CDN sources.
     os.makedirs(workdir, exist_ok=True)
     try:
-        resp = requests.get(url, headers=BROWSER_HEADERS, stream=True, timeout=30)
+        resp = requests.get(url, headers=_headers_for_url(url), stream=True, timeout=30)
         resp.raise_for_status()
     except Exception as e:
         logger.warning("Failed to download %s: %s", url, e)
         return None
 
-    content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
+    content_type = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+
+    # Reject block pages / interstitials that came back as HTML instead of media.
+    if content_type.startswith("text/") or "html" in content_type:
+        logger.warning("Rejected non-media response for %s (content-type: %s)", url, content_type)
+        return None
+
     ext = mimetypes.guess_extension(content_type) or os.path.splitext(url.split("?")[0])[1] or ".bin"
     path = os.path.join(workdir, f"item_{idx}{ext}")
 
@@ -52,6 +76,11 @@ def _download_url_to_file(url, workdir, idx):
                     f.write(chunk)
     except Exception as e:
         logger.warning("Failed to save %s: %s", url, e)
+        return None
+
+    if os.path.getsize(path) < 256:
+        # Suspiciously small -- likely an error page or empty response body.
+        logger.warning("Downloaded file for %s is too small, discarding", url)
         return None
 
     return path
