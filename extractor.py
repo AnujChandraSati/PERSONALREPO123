@@ -2,11 +2,19 @@ import os
 import subprocess
 import time
 
+import requests
 import yt_dlp
 from RedDownloader import RedDownloader
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov"}
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    )
+}
 
 
 def _kind_for_ext(ext):
@@ -16,6 +24,21 @@ def _kind_for_ext(ext):
     if ext in VIDEO_EXTS:
         return "video"
     return "document"
+
+
+def _resolve_reddit_share_link(url):
+    # Reddit share links (/r/sub/s/xxxxx) redirect to the real permalink.
+    # Resolve them up front so RedDownloader/gallery-dl/yt-dlp all get the
+    # canonical URL instead of a short link some of them can't parse.
+    if "/s/" not in url:
+        return url
+    try:
+        resp = requests.head(url, headers=BROWSER_HEADERS, allow_redirects=True, timeout=15)
+        if resp.url and resp.url != url:
+            return resp.url.split("?")[0]
+    except Exception:
+        pass
+    return url
 
 
 def _with_429_retry(fn, retries=1, delay=5):
@@ -111,6 +134,10 @@ def extract_gallery_dl(url):
     urls = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     items = []
     for u in urls:
+        if u.split("?")[0] == url.split("?")[0]:
+            # gallery-dl's generic extractor sometimes echoes the input page
+            # back when it can't identify real media -- that's not a result.
+            continue
         ext = os.path.splitext(u.split("?")[0])[1]
         items.append({"kind": _kind_for_ext(ext) or "photo", "source": "url", "value": u})
 
@@ -122,6 +149,9 @@ def extract_gallery_dl(url):
 
 def extract_media(url, workdir):
     url = url.strip()
+
+    if "reddit.com" in url and "/s/" in url:
+        url = _resolve_reddit_share_link(url)
 
     if "redgifs.com" in url:
         # RedGifs is a separate host Reddit often embeds/links out to for GIFs.
