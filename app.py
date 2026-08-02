@@ -1,9 +1,11 @@
 import logging
+import mimetypes
 import os
 import shutil
 import threading
 import uuid
 
+import requests
 from flask import Flask, jsonify, request
 
 from extractor import extract_media
@@ -18,6 +20,41 @@ from telegram_utils import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    )
+}
+
+
+def _download_url_to_file(url, workdir, idx):
+    # Download a remote media URL server-side (with browser headers) so
+    # Telegram never has to fetch it directly -- avoids hotlink protection /
+    # missing-header rejections from Reddit/CDN sources.
+    os.makedirs(workdir, exist_ok=True)
+    try:
+        resp = requests.get(url, headers=BROWSER_HEADERS, stream=True, timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("Failed to download %s: %s", url, e)
+        return None
+
+    content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
+    ext = mimetypes.guess_extension(content_type) or os.path.splitext(url.split("?")[0])[1] or ".bin"
+    path = os.path.join(workdir, f"item_{idx}{ext}")
+
+    try:
+        with open(path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+    except Exception as e:
+        logger.warning("Failed to save %s: %s", url, e)
+        return None
+
+    return path
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "changeme")
@@ -79,21 +116,35 @@ def process_url(chat_id, url, message_id):
         sendable = items[:MAX_ITEMS]
 
         sent = 0
-        for item in sendable:
+        last_error = None
+        for idx, item in enumerate(sendable):
+            local_path = item["value"]
             is_file = item["source"] == "file"
+
+            if not is_file:
+                downloaded = _download_url_to_file(item["value"], workdir, idx)
+                if downloaded:
+                    local_path = downloaded
+                    is_file = True
+                else:
+                    last_error = "Couldn't download media from source URL"
+                    continue
+
             try:
                 if item["kind"] == "photo":
-                    resp = send_photo(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
+                    resp = send_photo(BOT_TOKEN, chat_id, local_path, is_file=is_file)
                 elif item["kind"] == "video":
-                    resp = send_video(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
+                    resp = send_video(BOT_TOKEN, chat_id, local_path, is_file=is_file)
                 else:
-                    resp = send_document(BOT_TOKEN, chat_id, item["value"], is_file=is_file)
+                    resp = send_document(BOT_TOKEN, chat_id, local_path, is_file=is_file)
 
                 if resp.get("ok"):
                     sent += 1
                 else:
+                    last_error = resp.get("description", str(resp))
                     logger.warning("Telegram send failed: %s", resp)
-            except Exception:
+            except Exception as e:
+                last_error = str(e)
                 logger.exception("Failed to send item: %s", item)
 
         if not items:
@@ -108,15 +159,17 @@ def process_url(chat_id, url, message_id):
                 delete_message(BOT_TOKEN, chat_id, message_id)
         elif sent > 0:
             missed = len(sendable) - sent
+            reason = f"\nReason: {last_error}" if last_error else ""
             send_message(
                 BOT_TOKEN, chat_id,
-                f"Sent {sent}/{len(sendable)} -- {missed} item(s) failed to send:\n{url}",
+                f"Sent {sent}/{len(sendable)} -- {missed} item(s) failed to send:\n{url}{reason}",
                 reply_to_message_id=message_id,
             )
         else:
+            reason = f"\nReason: {last_error}" if last_error else ""
             send_message(
                 BOT_TOKEN, chat_id,
-                f"Found media but couldn't send it:\n{url}",
+                f"Found media but couldn't send it:\n{url}{reason}",
                 reply_to_message_id=message_id,
             )
 
