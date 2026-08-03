@@ -1,6 +1,7 @@
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import threading
 import uuid
@@ -46,6 +47,35 @@ def _headers_for_url(url):
             headers["Referer"] = referer
             break
     return headers
+
+
+URL_RE = re.compile(r"https?://\S+")
+
+
+def find_url(text):
+    """Pull the first URL out of a message, even if it's surrounded by other
+    text/formatting (e.g. Reddit's native 'Share -> Telegram' button)."""
+    match = URL_RE.search(text)
+    return match.group(0).rstrip(").,!?") if match else None
+
+
+def is_reddit_video_post(url):
+    """Lightweight pre-check (no download) so Render can skip local
+    processing for video posts entirely -- merging video+audio in-memory is
+    what blows past Render's 512MB limit and gets the whole process OOM
+    killed, which no amount of try/except inside process_url can catch."""
+    if "reddit.com" not in url and "redd.it" not in url:
+        return False
+    try:
+        check_url = url if url.endswith(".json") else url.rstrip("/") + ".json"
+        resp = requests.get(check_url, headers=BROWSER_HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+        post = data[0]["data"]["children"][0]["data"]
+        return bool(post.get("is_video"))
+    except Exception:
+        return False
 
 
 def _download_url_to_file(url, workdir, idx):
@@ -130,7 +160,22 @@ def webhook():
         return jsonify(ok=True)
 
     if not text.startswith("http"):
-        send_message(BOT_TOKEN, chat_id, "That doesn't look like a URL. Send me a link.")
+        found = find_url(text)
+        if not found:
+            return jsonify(ok=True)
+        text = found
+
+    if is_reddit_video_post(text):
+        # Skip local processing entirely for video posts -- Render's 512MB
+        # limit can't safely handle in-memory video/audio merging, and an
+        # OOM kill can't be caught or fall back gracefully. Send straight
+        # to a GitHub Actions worker, which has 7GB RAM to spare.
+        if not dispatch_to_github(text, chat_id, message_id):
+            send_message(
+                BOT_TOKEN, chat_id,
+                f"Couldn't hand this video off to a worker right now:\n{text}",
+                reply_to_message_id=message_id,
+            )
         return jsonify(ok=True)
 
     # Process in a background thread so we return 200 to Telegram immediately
