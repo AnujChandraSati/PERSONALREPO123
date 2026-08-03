@@ -9,6 +9,7 @@ import requests
 from flask import Flask, jsonify, request
 
 from extractor import extract_media
+from github_dispatch import dispatch_to_github
 from telegram_utils import (
     delete_message,
     send_document,
@@ -177,11 +178,12 @@ def process_url(chat_id, url, message_id):
                 logger.exception("Failed to send item: %s", item)
 
         if not items:
-            send_message(
-                BOT_TOKEN, chat_id,
-                f"Couldn't find any media in this one:\n{url}",
-                reply_to_message_id=message_id,
-            )
+            if not dispatch_to_github(url, chat_id, message_id):
+                send_message(
+                    BOT_TOKEN, chat_id,
+                    f"Couldn't find any media in this one:\n{url}",
+                    reply_to_message_id=message_id,
+                )
         elif sent == len(sendable) and sent > 0:
             # Everything found got sent successfully -- clean up the original message.
             if message_id:
@@ -195,19 +197,21 @@ def process_url(chat_id, url, message_id):
                 reply_to_message_id=message_id,
             )
         else:
-            reason = f"\nReason: {last_error}" if last_error else ""
-            send_message(
-                BOT_TOKEN, chat_id,
-                f"Found media but couldn't send it:\n{url}{reason}",
-                reply_to_message_id=message_id,
-            )
+            if not dispatch_to_github(url, chat_id, message_id):
+                reason = f"\nReason: {last_error}" if last_error else ""
+                send_message(
+                    BOT_TOKEN, chat_id,
+                    f"Found media but couldn't send it:\n{url}{reason}",
+                    reply_to_message_id=message_id,
+                )
 
     except Exception as e:
         logger.exception("process_url failed")
-        send_message(
-            BOT_TOKEN, chat_id, f"Something went wrong with:\n{url}",
-            reply_to_message_id=message_id,
-        )
+        if not dispatch_to_github(url, chat_id, message_id):
+            send_message(
+                BOT_TOKEN, chat_id, f"Something went wrong with:\n{url}",
+                reply_to_message_id=message_id,
+            )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
