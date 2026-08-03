@@ -51,6 +51,19 @@ def _headers_for_url(url):
 
 URL_RE = re.compile(r"https?://\S+")
 
+_recently_seen = set()
+_MAX_SEEN = 2000
+
+
+def already_seen(chat_id, message_id):
+    key = f"{chat_id}:{message_id}"
+    if key in _recently_seen:
+        return True
+    _recently_seen.add(key)
+    if len(_recently_seen) > _MAX_SEEN:
+        _recently_seen.clear()
+    return False
+
 
 def find_url(text):
     """Pull the first URL out of a message, even if it's surrounded by other
@@ -59,13 +72,14 @@ def find_url(text):
     return match.group(0).rstrip(").,!?") if match else None
 
 
-def is_reddit_video_post(url):
-    """Lightweight pre-check (no download) so Render can skip local
-    processing for video posts entirely -- merging video+audio in-memory is
-    what blows past Render's 512MB limit and gets the whole process OOM
-    killed, which no amount of try/except inside process_url can catch."""
+def safe_for_local_processing(url):
+    """Returns True only when we've positively confirmed this ISN'T a Reddit
+    video post. Any uncertainty (network error, rate limit, bad response)
+    defaults to False -- meaning route to GitHub -- since the failure mode
+    of guessing wrong here is an uncatchable OOM kill on Render, not just an
+    error message."""
     if "reddit.com" not in url and "redd.it" not in url:
-        return False
+        return True
     try:
         check_url = url if url.endswith(".json") else url.rstrip("/") + ".json"
         resp = requests.get(check_url, headers=BROWSER_HEADERS, timeout=10)
@@ -73,7 +87,7 @@ def is_reddit_video_post(url):
             return False
         data = resp.json()
         post = data[0]["data"]["children"][0]["data"]
-        return bool(post.get("is_video"))
+        return not bool(post.get("is_video"))
     except Exception:
         return False
 
@@ -148,6 +162,9 @@ def webhook():
     message_id = message.get("message_id")
     text = (message.get("text") or "").strip()
 
+    if message_id and already_seen(chat_id, message_id):
+        return jsonify(ok=True)
+
     if not text:
         return jsonify(ok=True)
 
@@ -165,15 +182,13 @@ def webhook():
             return jsonify(ok=True)
         text = found
 
-    if is_reddit_video_post(text):
-        # Skip local processing entirely for video posts -- Render's 512MB
-        # limit can't safely handle in-memory video/audio merging, and an
-        # OOM kill can't be caught or fall back gracefully. Send straight
-        # to a GitHub Actions worker, which has 7GB RAM to spare.
+    if not safe_for_local_processing(text):
+        # Either confirmed video, or we couldn't confirm it's safe -- either
+        # way, don't risk it locally. Route straight to a GitHub worker.
         if not dispatch_to_github(text, chat_id, message_id):
             send_message(
                 BOT_TOKEN, chat_id,
-                f"Couldn't hand this video off to a worker right now:\n{text}",
+                f"Couldn't hand this off to a worker right now:\n{text}",
                 reply_to_message_id=message_id,
             )
         return jsonify(ok=True)
