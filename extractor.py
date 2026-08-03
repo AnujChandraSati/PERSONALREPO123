@@ -33,9 +33,11 @@ def _resolve_reddit_share_link(url):
     if "/s/" not in url:
         return url
     try:
-        resp = requests.head(url, headers=BROWSER_HEADERS, allow_redirects=True, timeout=15)
-        if resp.url and resp.url != url:
-            return resp.url.split("?")[0]
+        resp = requests.get(url, headers=BROWSER_HEADERS, allow_redirects=True, timeout=15, stream=True)
+        resolved = resp.url
+        resp.close()
+        if resolved and resolved != url:
+            return resolved.split("?")[0]
     except Exception:
         pass
     return url
