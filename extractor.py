@@ -58,8 +58,9 @@ def _with_429_retry(fn, retries=1, delay=5):
 
 def extract_reddit(url, workdir):
     os.makedirs(workdir, exist_ok=True)
+    dest = workdir if workdir.endswith("/") else workdir + "/"
     try:
-        RedDownloader.Download(url, output="media", destination=workdir, verbose=False)
+        RedDownloader.Download(url, output="media", destination=dest, verbose=False)
     except Exception as e:
         return [], f"RedDownloader error: {e}"
 
