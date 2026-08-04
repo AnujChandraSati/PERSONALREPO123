@@ -72,26 +72,6 @@ def find_url(text):
     return match.group(0).rstrip(").,!?") if match else None
 
 
-def safe_for_local_processing(url):
-    """Returns True only when we've positively confirmed this ISN'T a Reddit
-    video post. Any uncertainty (network error, rate limit, bad response)
-    defaults to False -- meaning route to GitHub -- since the failure mode
-    of guessing wrong here is an uncatchable OOM kill on Render, not just an
-    error message."""
-    if "reddit.com" not in url and "redd.it" not in url:
-        return True
-    try:
-        check_url = url if url.endswith(".json") else url.rstrip("/") + ".json"
-        resp = requests.get(check_url, headers=BROWSER_HEADERS, timeout=10)
-        if resp.status_code != 200:
-            return False
-        data = resp.json()
-        post = data[0]["data"]["children"][0]["data"]
-        return not bool(post.get("is_video"))
-    except Exception:
-        return False
-
-
 def _download_url_to_file(url, workdir, idx):
     # Download a remote media URL server-side (with browser + referer headers)
     # so Telegram never has to fetch it directly -- avoids hotlink protection /
@@ -182,17 +162,6 @@ def webhook():
             return jsonify(ok=True)
         text = found
 
-    if not safe_for_local_processing(text):
-        # Either confirmed video, or we couldn't confirm it's safe -- either
-        # way, don't risk it locally. Route straight to a GitHub worker.
-        if not dispatch_to_github(text, chat_id, message_id):
-            send_message(
-                BOT_TOKEN, chat_id,
-                f"Couldn't hand this off to a worker right now:\n{text}",
-                reply_to_message_id=message_id,
-            )
-        return jsonify(ok=True)
-
     # Process in a background thread so we return 200 to Telegram immediately
     # (otherwise Telegram will retry the webhook on slow extractions).
     threading.Thread(target=process_url, args=(chat_id, text, message_id), daemon=True).start()
@@ -238,12 +207,7 @@ def process_url(chat_id, url, message_id):
                 logger.exception("Failed to send item: %s", item)
 
         if not items:
-            if not dispatch_to_github(url, chat_id, message_id):
-                send_message(
-                    BOT_TOKEN, chat_id,
-                    f"Couldn't find any media in this one:\n{url}",
-                    reply_to_message_id=message_id,
-                )
+            dispatch_to_github(url, chat_id, message_id)
         elif sent == len(sendable) and sent > 0:
             # Everything found got sent successfully -- clean up the original message.
             if message_id:
@@ -257,21 +221,11 @@ def process_url(chat_id, url, message_id):
                 reply_to_message_id=message_id,
             )
         else:
-            if not dispatch_to_github(url, chat_id, message_id):
-                reason = f"\nReason: {last_error}" if last_error else ""
-                send_message(
-                    BOT_TOKEN, chat_id,
-                    f"Found media but couldn't send it:\n{url}{reason}",
-                    reply_to_message_id=message_id,
-                )
+            dispatch_to_github(url, chat_id, message_id)
 
     except Exception as e:
         logger.exception("process_url failed")
-        if not dispatch_to_github(url, chat_id, message_id):
-            send_message(
-                BOT_TOKEN, chat_id, f"Something went wrong with:\n{url}",
-                reply_to_message_id=message_id,
-            )
+        dispatch_to_github(url, chat_id, message_id)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
